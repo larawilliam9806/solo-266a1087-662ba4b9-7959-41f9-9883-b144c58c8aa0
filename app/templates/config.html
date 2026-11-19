@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}归零配置 - 电量日核算{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>设置 / 修改归零配置</h2>
+  <p class="hint">两项均为正数。提交时系统按新配置重新核算该计量点的<strong>全部历史读数</strong>：
+    若存在读数不小于归零电量（越界），或某相邻读数区间任何归零次数都不满足功率约束（无解），
+    将指出冲突并<strong>拒绝本次配置变更，保留原配置、明细和版本号</strong>。</p>
+  <form method="post" action="{{ url_for('main.config') }}" class="query">
+    <label>计量点
+      <input list="point-list" name="point" value="{{ preselect }}" required maxlength="200" placeholder="如 MP001">
+      <datalist id="point-list">
+        {% for p in points %}<option value="{{ p }}">{% endfor %}
+      </datalist>
+    </label>
+    <label>归零电量 R (kWh)
+      <input type="text" inputmode="decimal" name="rollover" required placeholder="如 10000">
+    </label>
+    <label>最大功率 P (kW)
+      <input type="text" inputmode="decimal" name="max_power" required placeholder="如 10">
+    </label>
+    <button type="submit">保存配置</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>当前配置</h2>
+  {% if configs %}
+  <table>
+    <thead>
+      <tr><th>计量点</th><th>归零电量 R (kWh)</th><th>最大功率 P (kW)</th><th>更新时间 (UTC)</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for c in configs %}
+      <tr>
+        <td>{{ c['point'] }}</td>
+        <td class="num">{{ c['rollover'] }}</td>
+        <td class="num">{{ c['max_power'] }}</td>
+        <td>{{ c['updated_at'] | fmt_ts }}</td>
+        <td><a href="{{ url_for('main.config', point=c['point']) }}">修改</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">尚无计量点配置；未配置的计量点沿用原规则。</p>
+  {% endif %}
+  <p><a href="{{ url_for('main.index') }}">返回首页</a>
+     ｜ <a href="{{ url_for('main.usage') }}">查询逐日用量</a></p>
+</section>
+{% endblock %}

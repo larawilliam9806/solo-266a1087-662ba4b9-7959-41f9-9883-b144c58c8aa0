@@ -24,20 +24,65 @@
 {% if days is not none %}
 <section class="card">
   <h2>计量点 {{ point }}：{{ start }} ~ {{ end }}</h2>
-  <p>合计用量：<strong>{{ total | fmt_num }}</strong> kWh
-     （数据版本 v{{ version }}，增量计入后次读数所属 UTC 日）</p>
+  {% if cfg %}
+  <p class="hint">已配置：归零电量 R = {{ cfg.rollover | fmt_num }} kWh，
+     最大功率 P = {{ cfg.max_power | fmt_num }} kW（表盘读数须 &lt; R）。</p>
+  {% else %}
+  <p class="hint">该计量点未配置归零参数，沿用原规则（增量 = 后次 − 前次）。</p>
+  {% endif %}
+  <p>已核算用量合计：<strong>{{ total | fmt_num }}</strong> kWh
+     （数据版本 v{{ version }}，增量计入后次读数所属 UTC 日；待核区间不计入）</p>
   <table>
     <thead><tr><th>日期 (UTC)</th><th>用量 (kWh)</th><th>备注</th></tr></thead>
     <tbody>
       {% for d in days %}
-      <tr class="{{ 'gapday' if d.gap }}">
+      <tr class="{{ 'gapday' if d.gap }}{{ ' pendingday' if d.pending }}">
         <td>{{ d.day }}</td>
         <td class="num">{{ d.kwh | fmt_num }}</td>
-        <td>{{ '含缺口区间' if d.gap }}</td>
+        <td>
+          {% if d.gap %}含缺口区间{% endif %}
+          {% if d.pending %}含待核区间（未计入）{% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+</section>
+
+<section class="card">
+  <h2>待核区间</h2>
+  {% if pending %}
+  <p class="hint">相邻读数存在多个可行归零次数（或无解），无法唯一折算，暂不计入用量；
+     补传读数或换表后系统自动重新判定受影响区间。</p>
+  <table>
+    <thead>
+      <tr>
+        <th>区间起点（不含）</th><th>区间终点（含）</th><th>读数 v1 → v2 (kWh)</th>
+        <th>归零次数范围</th><th>折算增量范围 (kWh)</th><th>状态</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in pending %}
+      <tr class="pendingday">
+        <td>{{ p.start | fmt_ts }}</td>
+        <td>{{ p.end | fmt_ts }}</td>
+        <td class="num">{{ p.v1 | fmt_num }} → {{ p.v2 | fmt_num }}</td>
+        {% if p.resolution == 'pending' %}
+        <td class="num">{{ p.n_min }} ~ {{ p.n_max }} 次</td>
+        <td class="num">{{ p.min_delta | fmt_num }} ~ {{ p.max_delta | fmt_num }}</td>
+        <td>待核（不计入用量）</td>
+        {% else %}
+        <td class="num">—</td>
+        <td class="num">—</td>
+        <td>无解：任何归零次数均不满足功率约束</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">所选范围内没有待核区间。</p>
+  {% endif %}
 </section>
 
 <section class="card">

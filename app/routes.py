@@ -17,11 +17,15 @@ from .db import get_db
 
 bp = Blueprint("main", __name__)
 
-KIND_NAMES = {"readings": "读数", "swaps": "换表"}
+KIND_NAMES = {"readings": "读数", "swaps": "换表", "config": "归零配置"}
 
 
 def data_version(conn):
-    """数据版本号 = 最近一个生效批次 id。同一事务内读取，保证版本与内容一致。"""
+    """数据版本号 = 最近一个生效批次 id（含读数、换表与配置变更）。
+
+    所有写操作都在 BEGIN IMMEDIATE 串行事务内提交，查询在单个读事务内完成，
+    因此一次查询看到的用量、待核区间与版本号必然对应同一组配置及明细。
+    """
     return conn.execute(
         "SELECT COALESCE(MAX(id), 0) AS v FROM uploads WHERE status = 'applied'"
     ).fetchone()["v"]
@@ -33,9 +37,16 @@ def list_points(conn):
         for r in conn.execute(
             "SELECT point FROM ("
             "  SELECT point FROM readings UNION SELECT point FROM swaps"
+            "  UNION SELECT point FROM configs"
             ") ORDER BY point"
         )
     ]
+
+
+def list_configs(conn):
+    return conn.execute(
+        "SELECT point, rollover, max_power, updated_at FROM configs ORDER BY point"
+    ).fetchall()
 
 
 def record_rejected(conn, kind, filename, message, rows_received):
@@ -58,6 +69,7 @@ def index():
     conn.execute("BEGIN")  # 单个读事务：页面看到的是同一版快照
     try:
         points = list_points(conn)
+        configs = list_configs(conn)
         uploads = conn.execute(
             "SELECT * FROM uploads ORDER BY id DESC LIMIT 50"
         ).fetchall()
@@ -67,6 +79,7 @@ def index():
     return render_template(
         "index.html",
         points=points,
+        configs=configs,
         uploads=uploads,
         version=version,
         kind_names=KIND_NAMES,
@@ -75,7 +88,7 @@ def index():
 
 @bp.route("/upload/<kind>", methods=["POST"])
 def upload(kind):
-    if kind not in KIND_NAMES:
+    if kind not in ("readings", "swaps"):
         abort(404)
     f = request.files.get("file")
     if f is None or not f.filename:
@@ -129,6 +142,71 @@ def upload(kind):
     return redirect(url_for("main.index"))
 
 
+@bp.route("/config", methods=["GET", "POST"])
+def config():
+    """设置/修改计量点的归零电量（kWh）与最大功率（kW），两者均为正数。"""
+    conn = get_db()
+    if request.method == "POST":
+        point = (request.form.get("point") or "").strip()
+        rollover_raw = (request.form.get("rollover") or "").strip()
+        max_power_raw = (request.form.get("max_power") or "").strip()
+        if not point:
+            flash("配置被拒绝：计量点不能为空", "error")
+            return redirect(url_for("main.config"))
+        if len(point) > logic.MAX_POINT_LEN:
+            flash(f"配置被拒绝：计量点名称过长（>{logic.MAX_POINT_LEN} 字符）", "error")
+            return redirect(url_for("main.config"))
+        try:
+            rollover = logic.parse_positive(rollover_raw, "归零电量")
+            max_power = logic.parse_positive(max_power_raw, "最大功率")
+        except ValueError as e:
+            # 表单级错误同样留审计记录，且不触碰任何既有配置/明细
+            record_rejected(conn, "config", point, str(e), 0)
+            flash(f"配置被拒绝：{e}", "error")
+            return redirect(url_for("main.config"))
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                "INSERT INTO uploads(kind, filename, status, message, rows_received,"
+                " rows_applied, created_at) VALUES (?,?,?,?,?,0,?)",
+                ("config", point, "applied", "", 1, logic.now_ts()),
+            )
+            upload_id = cur.lastrowid
+            logic.apply_config(conn, upload_id, point, rollover, max_power)
+            conn.execute("COMMIT")
+            flash(
+                f"计量点 {point} 归零配置已生效：归零电量 "
+                f"{logic.fmt_num(rollover)} kWh，最大功率 {logic.fmt_num(max_power)} kW"
+                f"（数据版本 v{upload_id}）",
+                "success",
+            )
+        except logic.BatchRejected as e:
+            conn.execute("ROLLBACK")
+            record_rejected(conn, "config", point, str(e), 1)
+            flash(str(e), "error")
+        except sqlite3.OperationalError as e:
+            conn.execute("ROLLBACK")
+            flash(f"系统繁忙，请重试（{e}）", "error")
+        return redirect(url_for("main.config"))
+
+    conn.execute("BEGIN")
+    try:
+        points = list_points(conn)
+        configs = list_configs(conn)
+        version = data_version(conn)
+        preselect = (request.args.get("point") or "").strip()
+    finally:
+        conn.execute("COMMIT")
+    return render_template(
+        "config.html",
+        points=points,
+        configs=configs,
+        version=version,
+        preselect=preselect,
+    )
+
+
 def _resolve_range(conn, point, start, end):
     """校验/补全日期范围，返回 (start_day, end_day)。缺省时取该点数据最近 31 天。"""
     if start and end:
@@ -152,6 +230,29 @@ def _resolve_range(conn, point, start, end):
     return d0.strftime("%Y-%m-%d"), d1.strftime("%Y-%m-%d")
 
 
+def _pending_json(items, config):
+    out = []
+    for p in items:
+        entry = {
+            "start": p["start"],
+            "end": p["end"],
+            "v1": logic.fmt_num(p["v1"]),
+            "v2": logic.fmt_num(p["v2"]),
+            "resolution": p["resolution"],  # pending | infeasible
+        }
+        if p["resolution"] == "pending":
+            entry.update(
+                n_min=p["n_min"],
+                n_max=p["n_max"],
+                min_kwh=logic.fmt_num(p["min_delta"]),
+                max_kwh=logic.fmt_num(p["max_delta"]),
+            )
+        else:
+            entry.update(n_min=None, n_max=None, min_kwh=None, max_kwh=None)
+        out.append(entry)
+    return out
+
+
 @bp.route("/usage")
 def usage():
     point = request.args.get("point", "").strip()
@@ -162,12 +263,14 @@ def usage():
     try:
         points = list_points(conn)
         version = data_version(conn)
-        days = gaps = total = None
+        days = gaps = pending = total = cfg = None
         error = None
         if point:
             try:
                 start, end = _resolve_range(conn, point, start, end)
-                days, gaps, total = logic.usage_range(conn, point, start, end)
+                days, gaps, pending, total, cfg = logic.usage_range(
+                    conn, point, start, end
+                )
             except ValueError as e:
                 error = str(e)
     finally:
@@ -180,7 +283,9 @@ def usage():
         end=end,
         days=days,
         gaps=gaps,
+        pending=pending,
         total=total,
+        cfg=cfg,
         error=error,
         version=version,
     )
@@ -200,7 +305,9 @@ def api_usage():
             start, end = _resolve_range(conn, point, start, end)
         except ValueError as e:
             return jsonify(error=str(e)), 400
-        days, gaps, total = logic.usage_range(conn, point, start, end)
+        days, gaps, pending, total, cfg = logic.usage_range(
+            conn, point, start, end
+        )
         version = data_version(conn)
     finally:
         conn.execute("COMMIT")
@@ -209,10 +316,24 @@ def api_usage():
         start=start,
         end=end,
         version=version,
+        config=(
+            None
+            if cfg is None
+            else {
+                "rollover_kwh": logic.fmt_num(cfg["rollover"]),
+                "max_power_kw": logic.fmt_num(cfg["max_power"]),
+            }
+        ),
         total_kwh=logic.fmt_num(total),
         days=[
-            {"day": d["day"], "kwh": logic.fmt_num(d["kwh"]), "gap": d["gap"]}
+            {
+                "day": d["day"],
+                "kwh": logic.fmt_num(d["kwh"]),
+                "gap": d["gap"],
+                "pending": d["pending"],
+            }
             for d in days
         ],
         gaps=[{"start": g["start"], "end": g["end"]} for g in gaps],
+        pending=_pending_json(pending, cfg),
     )

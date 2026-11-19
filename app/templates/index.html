@@ -19,6 +19,34 @@
 </section>
 
 <section class="card">
+  <h2>归零配置（机械表归零电量与最大功率）</h2>
+  <p class="hint">对计量点设置归零电量 R（kWh）与最大功率 P（kW）后，配置对历史和新读数同时生效：
+    表盘读数须小于 R；相邻读数间按归零次数 n 折算增量 <code>delta = v2 − v1 + n·R</code>，
+    且 <code>0 ≤ delta ≤ P × 间隔小时</code>。n 唯一时计入后次读数所属 UTC 日；多个可能时列为待核区间不计入用量。
+    未配置的计量点沿用原规则（增量 = 后次 − 前次，倒退即拒）。</p>
+  <form method="get" action="{{ url_for('main.config') }}">
+    <button type="submit">前往配置页设置 / 修改</button>
+  </form>
+  {% if configs %}
+  <table>
+    <thead><tr><th>计量点</th><th>归零电量 R (kWh)</th><th>最大功率 P (kW)</th><th>更新时间 (UTC)</th></tr></thead>
+    <tbody>
+      {% for c in configs %}
+      <tr>
+        <td>{{ c['point'] }}</td>
+        <td class="num">{{ c['rollover'] }}</td>
+        <td class="num">{{ c['max_power'] }}</td>
+        <td>{{ c['updated_at'] | fmt_ts }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">尚无计量点配置。</p>
+  {% endif %}
+</section>
+
+<section class="card">
   <h2>查询逐日用量</h2>
   <form method="get" action="{{ url_for('main.usage') }}" class="query">
     <label>计量点

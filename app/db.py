@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS swaps (
     upload_id INTEGER NOT NULL REFERENCES uploads(id),
     PRIMARY KEY (point, ts)
 );
+
+CREATE TABLE IF NOT EXISTS configs (
+    point        TEXT PRIMARY KEY,
+    rollover     TEXT NOT NULL,               -- 归零电量（kWh），正十进制；表盘读数须小于该值
+    max_power    TEXT NOT NULL,               -- 最大功率（kW），正十进制
+    upload_id    INTEGER NOT NULL REFERENCES uploads(id),
+    updated_at   TEXT NOT NULL
+);
 """
 
 
